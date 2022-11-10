@@ -9,7 +9,8 @@
 #define LOCATION_FIELD_LENGTH LOCATION_MAX_LENGTH+1
 #define EMP_ID_FIELD_LENGTH EMP_ID_MAX_LENGTH+1
 #define DATETIME_LENGTH 16
-#define INPUT_TOTAL_LENGTH DESCRIPTION_MAX_LENGTH+LOCATION_MAX_LENGTH+EMP_ID_MAX_LENGTH+DESCRIPTION_FIELD_LENGTH
+
+#define TOTAL_INPUT_LENGTH + LOCATION_MAX_LENGTH + EMP_ID_FIELD_LENGTH + DESCRIPTION_FIELD_LENGTH + LOCATION_FIELD_LENGTH + EMP_ID_FIELD_LENGTH + DATETIME_LENGTH
 
 // Declare the message structure
 
@@ -35,3 +36,5 @@ typedef struct meetingresponsebuf {
   int avail;//0 is no and 1 is yes
 } meeting_response_buf;
 #endif
+
+#define RESPONSE_BUFFER_LENGTH sizeof(meeting_response_buf) - sizeof(long)

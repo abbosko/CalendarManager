@@ -213,5 +213,3 @@ JNIEXPORT jstring JNICALL Java_edu_cs300_MessageJNI_readStringMsg
     result = (*env)->NewStringUTF(env,rbuf);
     return result;
 }
-
-

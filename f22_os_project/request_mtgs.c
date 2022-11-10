@@ -17,7 +17,6 @@ strlcpy(char       *dst,      /* O - Destination string */
 {
     size_t    srclen;         /* Length of source string */
 
-
     /*
      * Figure out how much room is needed...
      */
@@ -39,46 +38,49 @@ strlcpy(char       *dst,      /* O - Destination string */
     return (srclen);
 }
 #endif
-sem_t mutex;
-sem_t fill;
-sem_t empty;
 
-/* 
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t sendLock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t reqThread = PTHREAD_MUTEX_INITIALIZER;
+
+pthread_cond_t conditionVariables[200] = { PTHREAD_COND_INITIALIZER };
+int *response; 
+int done;
+void* send_message(void* rbuf);
+void* receive_message();
+void print_response(meeting_request_buf *rbuf);
+
+
+/*
 request_mtgs reads meeting requests from stdin for employees.
-Each request is checked against an employee's existing schedule for conflicts 
-by sending the request to the CalendarManager program via the System V queue. 
-The CalendarManager will respond with a message that indicates whether the meeting 
+Each request is checked against an employee's existing schedule for conflicts
+by sending the request to the CalendarManager program via the System V queue.
+The CalendarManager will respond with a message that indicates whether the meeting
 was added to the calendar by indicating availability (availability of 0 means conflict,
 availability of 1 means added). The request_mtgs will print out the result (conflict or added) of each meeting request.
 */
-/*
-void parse_message(char* messageLine, meeting_request_buf *rbuf) {
 
-sscanf(messageLine,"%d,%[^,],%[^,],%[^,],%[^,],%d", &rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, &rbuf->duration);  // parse each line
-if use call with no & 
-}
+void* send_message(void* input){
 
-*/
-void * send_message(char* messageLine){
-    meeting_request_buf *rbuf = malloc(sizeof(struct meetingrequestbuf));
     key_t key;
     int msqid;
     int msgflg = IPC_CREAT | 0666;
     int return_code;
-    int status;
+    int *status = malloc(sizeof(int));
+     
+    meeting_request_buf *rbuf = (meeting_request_buf*)input;
 
-    
-    // set buffer values
-    sscanf(messageLine,"%d,%[^,],%[^,],%[^,],%[^,],%d", &rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, &rbuf->duration);  // parse each line
+   
 
     key = ftok(FILE_IN_HOME_DIR,QUEUE_NUMBER);
-    
+
     if ((msqid = msgget(key, msgflg)) < 0) {
         int errnum = errno;
         fprintf(stderr, "Value of errno: %d\n", errno);
         perror("(msgget)");
         fprintf(stderr, "Error msgget: %s\n", strerror( errnum ));
     }
+
 #ifdef DEBUG
     else
         fprintf(stderr, "msgget: msgget succeeded: msgqid = %d\n", msqid);
@@ -86,113 +88,167 @@ void * send_message(char* messageLine){
 
     // We'll send message type 2
     rbuf->mtype = 2;
+    rbuf->request_id= rbuf->request_id;
     strncpy(rbuf->empId,rbuf->empId,EMP_ID_MAX_LENGTH);
     strncpy(rbuf->description_string,rbuf->description_string,DESCRIPTION_MAX_LENGTH);
     strncpy(rbuf->location_string,rbuf->location_string,LOCATION_MAX_LENGTH);
     strncpy(rbuf->datetime,rbuf->datetime,DATETIME_LENGTH);
-    // strncpy(rbuf.empId,"1234",EMP_ID_MAX_LENGTH);
-    // strncpy(rbuf.description_string,"Test description",DESCRIPTION_MAX_LENGTH);
-    // strncpy(rbuf.location_string,"zoom link",LOCATION_MAX_LENGTH);
-    // strncpy(rbuf.datetime,"2022-12-19T15:30",16);
-    // rbuf.duration=60;
+  
+ 
 
-    // Send a message.
-    sem_wait(&empty);
-    sem_wait(&mutex);
-    return_code = msgsnd(msqid, &rbuf, SEND_BUFFER_LENGTH, IPC_NOWAIT);
-    sem_post(&mutex);
-    sem_post(&fill);
-
+    pthread_mutex_lock(&sendLock);
+    return_code = msgsnd(msqid, rbuf, SEND_BUFFER_LENGTH, IPC_NOWAIT);
+    pthread_mutex_unlock(&sendLock);
 
     if(return_code < 0) {
         int errnum = errno;
-        fprintf(stdout,"%d, %ld, %d, %ld\n", msqid, rbuf->mtype, rbuf->request_id, SEND_BUFFER_LENGTH);
+        fprintf(stderr,"%d, %ld, %d, %ld\n", msqid, rbuf->mtype, rbuf->request_id, SEND_BUFFER_LENGTH);
         perror("(msgsnd)");
         fprintf(stderr, "Error sending msg: %s\n", strerror( errnum ));
         exit(1);
     }
-
+    
     else {
-    status = receive_message(key, msgflg);
-    print_response(rbuf, status);
-    //fprintf(stdout,"msgsnd--mtg_req: reqid %d empid %s descr %s loc %s date %s duration %d \n",
-    //rbuf->request_id,rbuf->empId,rbuf->description_string,rbuf->location_string,rbuf->datetime,rbuf->duration);
+       // wait for response 
+       pthread_mutex_lock(&lock);
+        while(done == 0 ){
+             pthread_cond_wait(&conditionVariables[rbuf->request_id], &reqThread); 
+        }
+        pthread_mutex_unlock(&lock);
+        
+        
+            if (response[rbuf->request_id] == 1){
+                printf("Meeting request %d for employee %s was accepted (%s @ %s starting %s for %d minutes)\n", rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, rbuf->duration);
+            }
+            else if (response[rbuf->request_id] == 0 ) {
+                printf("Meeting request %d for employee %s was rejected due to conflict (%s @ %s starting %s for %d minutes)\n", rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, rbuf->duration);
+            }
+            else {
+                fprintf(stderr, "Received unrecognized status code: %d\n", response[rbuf->request_id]);
+            }
+      
+     
+
+    }
+    
     }
 
-    pthread_exit(0);
-}
 
-int receive_message(key_t key, int msgflg){
 
+
+
+void* receive_message(){
+  while(1){
+    
     int msqid;
-    meeting_response_buf rbuf;
+    int msgflg = IPC_CREAT | 0666;
+    key_t key;
+    int ret;
+  
+    meeting_response_buf mybuf; 
 
-    if ((msqid = msgget(key, msgflg)) < 0) {
+
+
+    key = ftok(FILE_IN_HOME_DIR,QUEUE_NUMBER);
+    if (key == 0xffffffff) {
+        fprintf(stderr,"Key cannot be 0xffffffff..fix queue_ids.h to link to existing file\n");
+        //return 1;
+    }
+
+    
+     if ((msqid = msgget(key, msgflg)) < 0) {
         int errnum = errno;
         fprintf(stderr, "Value of errno: %d\n", errno);
         perror("(msgget)");
         fprintf(stderr, "Error msgget: %s\n", strerror( errnum ));
     }
-#ifdef DEBUG
-    else
-        fprintf(stderr, "msgget: msgget succeeded: msgqid = %d\n", msqid);
-#endif
-    // msgrcv to receive mtg request response type 1
-    int ret;
-    do {
-      ret = msgrcv(msqid, &rbuf, sizeof(rbuf)-sizeof(long), 1, 0);//receive type 1 message
 
-      int errnum = errno;
-      if (ret < 0 && errno !=EINTR){
+       
+        ret = msgrcv(msqid, &mybuf, sizeof(meeting_response_buf) - sizeof(long), 1, 0);
+
+        pthread_mutex_lock(&reqThread);
+
+        response[mybuf.request_id] = mybuf.avail;
+        int errnum = errno;
+        if (ret < 0 && errno !=EINTR){
         fprintf(stderr, "Value of errno: %d\n", errno);
         perror("Error printed by perror");
-        fprintf(stderr, "Error receiving msg: %s\n", strerror( errnum ));
-      }
-    } while ((ret < 0 ) && (errno == 4));
-
-
-    fprintf(stderr,"msgrcv-mtgReqResponse: request id %d  avail %d: \n",rbuf.request_id,rbuf.avail);
-    return rbuf.avail
-}
-
-void print_response(meeting_request_buf *rbuf, int status) {
-    if (status == 1){
-    printf("Meeting request %d for employee %s was accepted (%s @ %s starting %s for %d minutes", rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, rbuf->duration);
-    }
-    else if (status ==0 ) {
-    printf("Meeting request %d for employee %s was rejected due to conflict (%s @ %s starting %s for %d minutes", rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, rbuf->duration);
-    }
-    else {
-       fprintf(stderr, "Received unrecognized status code: %d\n", status);
+        fprintf(stderr, "Error receiving msg: %s\n", strerror( errnum )); }
+ 
+ 
+    done =1;
+    pthread_cond_signal(&conditionVariables[mybuf.request_id]);
+    pthread_mutex_unlock(&reqThread);
     }
 }
+
+ 
 
 int main(int argc, char **argv){
 
-char *messageLine = (char *)malloc(sizeof(char)*INPUT_TOTAL_LENGTH);
-sem_init(&mutex, 1);
-sem_init(&empty,0);
-sem_init(&fill, 0);
-/*
-int request_id;
-char *employee_id = (char *)malloc(sizeof(char)*EMP_ID_FIELD_LENGTH);
-char *description= (char *)malloc(sizeof(char)*DESCRIPTION_FIELD_LENGTH);
-char *location= (char *)malloc(sizeof(char)*LOCATION_FIELD_LENGTH);
-char *datetime= (char *)malloc(sizeof(char)*DATETIME_LENGTH);
-int duration = (int *)malloc(sizeof(int)*10);
-*/
-key_t key;
-pthread_t thread;
-meeting_request_buf *rbuf = malloc(sizeof(struct meetingrequestbuf));
+char *messageLine = (char *)malloc(sizeof(char)*SEND_BUFFER_LENGTH);
+meeting_request_buf *rbuf = malloc(sizeof(struct meetingrequestbuf)); 
+response  = malloc(sizeof(int) * 201);
 
 
- while (1) {
-   fgets(messageLine, INPUT_TOTAL_LENGTH, stdin);          // read in each line
-   if (feof(stdin) || messageLine[0]=='0') break;          // request id of 0 mens end of input
+pthread_t thread[200];
+int k=0;
+int j=0;
+pthread_t final_thread;
+pthread_t reader_thread;
+size_t size = SEND_BUFFER_LENGTH; 
 
+pthread_create(&reader_thread, NULL, (void*)receive_message, NULL);
 
-    pthread_create(&thread, NULL, (void*)send_message, messageLine);
-    pthread_join(thread, NULL);
- }
-    exit(0);
+ while (getline(&messageLine, &size, stdin)){       
+    k++;
+    meeting_request_buf *rbuf = malloc(sizeof(struct meetingrequestbuf));
+    
+    // remove quotations
+    for (int i = 0; i < SEND_BUFFER_LENGTH; i ++) {
+            if (messageLine[i] != '"' && messageLine[i] != '\\') { 
+                 messageLine[j++] = messageLine[i];
+            } else if (messageLine[i+1] == '"' && messageLine[i] == '\\') { 
+                 messageLine[j++] = '"';
+            } else if (messageLine[i+1] != '"' && messageLine[i] == '\\') { 
+                 messageLine[j++] = '\\';
+            }
+            }
+
+    
+    sscanf(messageLine,"%d,%[^,],%[^,],%[^,],%[^,],%d", &rbuf->request_id, rbuf->empId, rbuf->description_string, rbuf->location_string, rbuf->datetime, &rbuf->duration);  // parse each line
+    if (rbuf->request_id == 0){ break;}
+
+    pthread_create(&thread[k-1], NULL, send_message, rbuf);
+
+    }
+    
+for(int index = 0; index < k - 1; index++) {
+ pthread_join(thread[index], NULL);
 }
+    // send final message to signal end of input on java side
+    //pthread_create(&final_thread, NULL, send_message, rbuf);
+
+    // wait for last request and response reader to finish 
+   // pthread_join(final_thread, NULL);
+    pthread_join(reader_thread, NULL);
+  
+
+    // cleanup
+    free(messageLine);
+    free(rbuf);
+    pthread_mutex_destroy(&lock);
+    pthread_mutex_destroy(&sendLock);
+    pthread_mutex_destroy(&reqThread);
+    return 0;
+}
+
+// things to do:
+// deallocate mem
+// destroy locks and condiion variables
+// fix input to accomodate comma in middle of string
+// formatting
+// back up files 
+// terminate on 0
+
+
